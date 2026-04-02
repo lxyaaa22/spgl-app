@@ -1,0 +1,32 @@
+name: Build Linux Package
+on:
+  workflow_dispatch: # 允许手动在网页点击触发
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libudev-dev fakeroot dpkg
+          npm ci  # 使用 ci 保证依赖一致性，比 install 更快更省缓存
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Package Electron for Linux
+        run: npx electron-builder --linux AppImage --publish never
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPGL-Linux-Package
+          path: release/*.AppImage
