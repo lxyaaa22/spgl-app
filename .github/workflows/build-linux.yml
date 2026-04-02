@@ -1,30 +1,35 @@
-name: Build Linux
+name: Build Linux ARM64
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
 
 jobs:
-  build:
+  build-arm64:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        arch: [x64, arm64]  # 同时打包两种主流架构
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 20 }
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential libudev-dev fakeroot dpkg
-          # 清理并安装依赖
-          rm -rf node_modules package-lock.json
-          npm ci
-      - run: npm run build
-      - run: |
-          # electron-builder 原生支持 --x64 / --arm64 参数
-          npx electron-builder --linux AppImage --${{ matrix.arch }} --publish never
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Build ARM64 App
+        env:
+          npm_config_build_from_source: true  # 强制重新编译原生模块
+        run: |
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/app \
+            -w /app \
+            arm64v8/node:20-slim bash -c "
+            apt-get update && apt-get install -y build-essential python3 libudev-dev fakeroot dpkg && \
+            npm install && \
+            npm run build && \
+            npx electron-builder --linux AppImage --arm64 --publish never
+          "
+
       - uses: actions/upload-artifact@v4
         with:
-          name: SPGL-Linux-${{ matrix.arch }}
+          name: SPGL-Linux-arm64
           path: release/*.AppImage
