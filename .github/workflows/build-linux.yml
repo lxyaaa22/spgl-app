@@ -6,12 +6,12 @@ on:
   workflow_dispatch:
 
 env:
-  # 可选：抑制 Node.js 20 弃用警告（不影响构建，仅消除日志噪音）
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 
 jobs:
   build-arm64:
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
 
     steps:
       # ✅ 1. 强制释放运行器磁盘空间
@@ -37,114 +37,100 @@ jobs:
       # ✅ 3. 构建 & 打包 ARM64 AppImage
       - name: Build & Package ARM64 AppImage
         run: |
-          set -e
-          DOCKER_IMAGE="debian:11-slim"
-          
           docker run --rm --platform linux/arm64 \
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
-            ${DOCKER_IMAGE} bash << 'CONTAINER_SCRIPT'
-          set -e
+            "debian:11-slim" bash <<'DOCKER_SCRIPT'
+set -ex
 
-          echo '>>> 1. 安装基础系统依赖'
-          apt-get update
-          apt-get install -y --no-install-recommends \
-            curl wget ca-certificates build-essential python3 libudev-dev fakeroot dpkg \
-            zlib1g zlib1g-dev libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 \
-            libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-            libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file fuse xz-utils
-          update-ca-certificates
+echo '>>> 1. 安装基础依赖'
+apt-get update
+apt-get install -y --no-install-recommends \
+  curl wget ca-certificates build-essential python3 libudev-dev fakeroot dpkg \
+  zlib1g zlib1g-dev libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 \
+  libcups2 libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
+  libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file fuse xz-utils
+update-ca-certificates
 
-          echo '>>> 2. 手动安装 Node.js 20 (ARM64)'
-          NODE_VERSION=20.11.0
-          NODE_DIST=node-v${NODE_VERSION}-linux-arm64
-          curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/${NODE_DIST}.tar.xz -o node.tar.xz
-          tar -xf node.tar.xz -C /usr/local --strip-components=1
-          rm -f node.tar.xz
-          echo "✅ Node.js: $(node -v) | npm: $(npm -v)"
+echo '>>> 2. 安装 Node.js 20 (ARM64)'
+NODE_VERSION=20.11.0
+curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz -o node.tar.xz
+tar -xf node.tar.xz -C /usr/local --strip-components=1
+rm -f node.tar.xz
+node -v && npm -v
 
-          echo '>>> 3. 构建项目'
-          npm ci
-          npm run build
+echo '>>> 3. 构建项目'
+npm ci
+npm run build
 
-          echo '>>> 4. 生成未打包的 Electron 应用 (dir 模式)'
-          npx electron-builder --linux dir --arm64 --publish never
+echo '>>> 4. 生成未打包的 Electron 应用'
+npx electron-builder --linux dir --arm64 --publish never
 
-          echo '>>> 5. 准备 AppDir 结构'
-          UNPACKED_DIR=$(find release dist -maxdepth 1 -type d -name '*-unpacked' 2>/dev/null | head -n 1)
-          if [ -z "${UNPACKED_DIR}" ]; then
-              echo "❌ 未找到 unpacked 目录"
-              ls -la release/ dist/ 2>/dev/null || true
-              exit 1
-          fi
-          echo "✅ 找到目录: ${UNPACKED_DIR}"
+echo '>>> 5. 准备 AppDir 结构'
+UNPACKED_DIR=$(find release dist -maxdepth 1 -type d -name '*-unpacked' | head -n 1)
+if [ -z "${UNPACKED_DIR}" ]; then
+  echo "❌ 找不到 unpacked 目录"
+  ls -la release/ dist/ 2>/dev/null || echo "无输出"
+  exit 1
+fi
+echo "✅ 找到: ${UNPACKED_DIR}"
 
-          MAIN_EXEC=$(find "${UNPACKED_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.node" ! -name "*.sh" | head -n 1)
-          if [ -z "${MAIN_EXEC}" ]; then
-              echo "❌ 未找到主可执行文件"
-              ls -la "${UNPACKED_DIR}"
-              exit 1
-          fi
-          APP_NAME=$(basename "${MAIN_EXEC}")
-          echo "✅ 主程序: ${APP_NAME}"
+MAIN_EXEC=$(find "${UNPACKED_DIR}" -maxdepth 1 -type f -executable ! -name "*.so" ! -name "*.node" ! -name "*.sh" | head -n 1)
+APP_NAME=$(basename "${MAIN_EXEC}")
+echo "✅ 主程序: ${APP_NAME}"
 
-          mkdir -p AppDir/usr/lib
-          cp -r "${UNPACKED_DIR}/." AppDir/
-          chmod +x "AppDir/${APP_NAME}"
+mkdir -p AppDir/usr/lib
+cp -r "${UNPACKED_DIR}/." AppDir/
+chmod +x "AppDir/${APP_NAME}"
 
-          echo '>>> 6. 处理 libz 依赖'
-          cp /usr/lib/aarch64-linux-gnu/libz.so.1 AppDir/usr/lib/
-          if [ -L /usr/lib/aarch64-linux-gnu/libz.so ]; then
-            cp -d /usr/lib/aarch64-linux-gnu/libz.so AppDir/usr/lib/ || true
-          else
-            ln -sf libz.so.1 AppDir/usr/lib/libz.so
-          fi
+echo '>>> 6. 修复 libz 依赖'
+cp /usr/lib/aarch64-linux-gnu/libz.so.1 AppDir/usr/lib/
+if [ -L /usr/lib/aarch64-linux-gnu/libz.so ]; then
+  cp -d /usr/lib/aarch64-linux-gnu/libz.so AppDir/usr/lib/ || true
+else
+  ln -sf libz.so.1 AppDir/usr/lib/libz.so
+fi
 
-          echo '>>> 7. 修复 RPATH 与依赖链接'
-          find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name "${APP_NAME}" \) -exec \
-            patchelf --set-rpath '\$ORIGIN/../usr/lib:\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu' {} \; 2>/dev/null || true
-          find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name "${APP_NAME}" \) -exec \
-            bash -c 'for lib in $(patchelf --print-needed "$1" 2>/dev/null); do
-              [ "$lib" = "libz.so" ] && patchelf --replace-needed libz.so libz.so.1 "$1"
-            done' _ {} \; 2>/dev/null || true
+echo '>>> 7. 修复 RPATH'
+find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name "${APP_NAME}" \) -exec \
+  patchelf --set-rpath '\$ORIGIN/../usr/lib:\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu' {} \; 2>/dev/null || true
+find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name "${APP_NAME}" \) -exec \
+  bash -c 'for lib in $(patchelf --print-needed "$1" 2>/dev/null); do [ "$lib" = "libz.so" ] && patchelf --replace-needed libz.so libz.so.1 "$1"; done' _ {} \; 2>/dev/null || true
 
-          echo '>>> 8. 创建 AppRun'
-          cat > AppDir/AppRun << APPRUN
-          #!/bin/sh
-          HERE="$(dirname "$(readlink -f "$0")")"
-          export LD_LIBRARY_PATH="\${HERE}/usr/lib:\${LD_LIBRARY_PATH}"
-          exec "\${HERE}/${APP_NAME}" "\$@"
-          APPRUN
-          chmod +x AppDir/AppRun
+echo '>>> 8. 创建 AppRun'
+cat > AppDir/AppRun << APPRUN
+#!/bin/sh
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+exec "${HERE}/${APP_NAME}" "$@"
+APPRUN
+chmod +x AppDir/AppRun
 
-          echo '>>> 9. 运行 linuxdeploy 打包'
-          curl -fsSL -o linuxdeploy-aarch64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
-          chmod +x linuxdeploy-aarch64.AppImage
+echo '>>> 9. 运行 linuxdeploy 打包'
+curl -fsSL -o linuxdeploy-aarch64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
+chmod +x linuxdeploy-aarch64.AppImage
 
-          # 安全构建参数（自动查找 desktop/icon，找不到则跳过，避免报错中断）
-          DEPLOY_ARGS="--appdir AppDir --output appimage"
-          DESKTOP=$(find AppDir -name "*.desktop" | head -n 1)
-          ICON=$(find AppDir \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) | head -n 1)
-          [ -n "${DESKTOP}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --desktop-file ${DESKTOP}"
-          [ -n "${ICON}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --icon-file ${ICON}"
+DEPLOY_ARGS="--appdir AppDir --output appimage"
+DESKTOP_FILE=$(find AppDir -name '*.desktop' -print -quit)
+ICON_FILE=$(find AppDir \( -name '*.png' -o -name '*.svg' -o -name '*.xpm' \) -print -quit)
+[ -n "${DESKTOP_FILE}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --desktop-file ${DESKTOP_FILE}"
+[ -n "${ICON_FILE}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --icon-file ${ICON_FILE}"
 
-          echo "执行: ./linuxdeploy-aarch64.AppImage ${DEPLOY_ARGS}"
-          ./linuxdeploy-aarch64.AppImage ${DEPLOY_ARGS} 2>&1 | tee linuxdeploy.log
+./linuxdeploy-aarch64.AppImage ${DEPLOY_ARGS} 2>&1 | tee /app/linuxdeploy.log
 
-          echo '>>> 10. 验证产物并移动'
-          mkdir -p /app/release
-          APPIMAGE=$(find /app -maxdepth 1 -name "*.AppImage" -print -quit)
-          if [ -z "${APPIMAGE}" ]; then
-            echo "❌ 打包失败：未找到 .AppImage 文件！"
-            echo "--- linuxdeploy 日志末尾 ---"
-            tail -n 30 linuxdeploy.log
-            exit 1
-          fi
-          echo "✅ 成功生成: ${APPIMAGE}"
-          mv "${APPIMAGE}" /app/release/
-          echo "✅ 产物已移至 release/，目录内容："
-          ls -lh /app/release/
-          CONTAINER_SCRIPT
+echo '>>> 10. 验证并转移产物'
+mkdir -p /app/release
+APPIMAGE=$(find /app -maxdepth 1 -name "*.AppImage" -print -quit)
+if [ -z "${APPIMAGE}" ]; then
+  echo "❌ 打包失败：未生成 .AppImage"
+  echo "--- linuxdeploy 日志末尾 ---"
+  tail -n 50 /app/linuxdeploy.log
+  exit 1
+fi
+echo "✅ 成功生成: $(basename ${APPIMAGE})"
+mv "${APPIMAGE}" /app/release/
+ls -lh /app/release/
+DOCKER_SCRIPT
 
       # ✅ 4. 上传制品
       - uses: actions/upload-artifact@v4
