@@ -44,12 +44,12 @@ jobs:
             ${DOCKER_IMAGE} bash -c "
               set -e
               
-              echo '>>> 1. 安装基础系统依赖'
+              echo '>>> 1. 安装基础系统依赖 (包含 ca-certificates 修复 HTTPS 证书问题)'
               apt-get update
-              # 安装构建工具和库依赖
               apt-get install -y --no-install-recommends \
                 curl \
                 wget \
+                ca-certificates \
                 build-essential \
                 python3 \
                 libudev-dev \
@@ -77,23 +77,25 @@ jobs:
                 fuse \
                 xz-utils
 
+              # 更新证书库（确保新安装的证书生效）
+              update-ca-certificates
+
               echo '>>> 2. 手动安装 Node.js 20 (ARM64)'
-              # 直接从 nodejs.org 下载预编译的 ARM64 二进制包，避免 apt 源问题
               NODE_VERSION=20.11.0
               ARCH=arm64
               NODE_DIST=node-v\${NODE_VERSION}-linux-\${ARCH}
               
               echo \"Downloading Node.js \${NODE_VERSION} for \${ARCH}...\"
-              wget https://nodejs.org/dist/v\${NODE_VERSION}/\${NODE_DIST}.tar.xz
-              tar -xf \${NODE_DIST}.tar.xz -C /usr/local --strip-components=1
-              rm -f \${NODE_DIST}.tar.xz
+              # 使用 curl 替代 wget，通常对 TLS 握手兼容性更好
+              curl -fsSL https://nodejs.org/dist/v\${NODE_VERSION}/\${NODE_DIST}.tar.xz -o node.tar.xz
+              tar -xf node.tar.xz -C /usr/local --strip-components=1
+              rm -f node.tar.xz
               
               # 验证安装
-              node -v
-              npm -v
+              echo 'Node.js version:' && node -v
+              echo 'npm version:' && npm -v
 
               echo '>>> 3. 构建项目'
-              # 使用 npm ci 确保依赖一致
               npm ci
               npm run build
 
@@ -101,7 +103,6 @@ jobs:
               npx electron-builder --linux dir --arm64 --publish never
 
               echo '>>> 5. 准备 AppDir 结构'
-              # 查找生成的未打包目录
               UNPACKED_DIR=\$(ls -d release/*-linux-arm64-unpacked)
               APP_NAME=\$(basename \"\${UNPACKED_DIR}\" | sed 's/-linux-arm64-unpacked//')
               
@@ -111,22 +112,16 @@ jobs:
               mkdir -p AppDir/usr/lib
               mkdir -p AppDir/usr/bin
               
-              # 复制应用文件
               cp -r \"\${UNPACKED_DIR}/.\" AppDir/
-              
-              # 确保主可执行文件有执行权限
               chmod +x \"AppDir/\${APP_NAME}\"
 
               echo '>>> 6. 处理 libz 依赖 (关键修复步骤)'
-              # 在 Debian/ARM64 中，libz.so.1 是实际文件，libz.so 是软链接
               LIBZ_PATH=/usr/lib/aarch64-linux-gnu/libz.so.1
               LIBZ_LINK=/usr/lib/aarch64-linux-gnu/libz.so
               
               if [ -f \"\${LIBZ_PATH}\" ]; then
                 echo \"Copying \${LIBZ_PATH} to AppDir/usr/lib/\"
                 cp \"\${LIBZ_PATH}\" AppDir/usr/lib/
-                
-                # 如果原系统有 libz.so 软链接，也复制过去，或者手动创建
                 if [ -L \"\${LIBZ_LINK}\" ]; then
                   cp -d \"\${LIBZ_LINK}\" AppDir/usr/lib/ || true
                 else
@@ -138,11 +133,9 @@ jobs:
               fi
 
               echo '>>> 7. 修复二进制文件的 RPATH 和依赖'
-              # 使用 patchelf 确保所有二进制文件都能找到 AppDir/usr/lib 中的库
               find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name '\${APP_NAME}' \) -exec \
                 patchelf --set-rpath '\\\$ORIGIN/../usr/lib:\\\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu' {} \; 2>/dev/null || true
 
-              # 特别处理：确保没有任何二进制文件硬编码依赖 libz.so (不带版本号)
               find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name '\${APP_NAME}' \) -exec \
                 bash -c 'for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do if [ \"\$lib\" = \"libz.so\" ]; then patchelf --replace-needed libz.so libz.so.1 \"\$1\"; fi; done' _ {} \; 2>/dev/null || true
 
@@ -153,12 +146,11 @@ jobs:
               export LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"
               exec \"\${HERE}/\${APP_NAME_BIN}\" \"\$@\"
               EOF
-              # 替换 AppRun 中的占位符
               sed -i \"s|\${APP_NAME_BIN}|\${APP_NAME}|g\" AppDir/AppRun
               chmod +x AppDir/AppRun
 
               echo '>>> 9. 下载并运行 linuxdeploy 打包 AppImage'
-              wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
+              curl -fsSL -o linuxdeploy-aarch64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
               chmod +x linuxdeploy-aarch64.AppImage
               
               ./linuxdeploy-aarch64.AppImage \
@@ -172,8 +164,6 @@ jobs:
 
               echo '>>> 10. 移动产物'
               mv *.AppImage release/ || true
-              
-              echo '>>> 11. 最终检查：列出 release 目录'
               ls -lh release/
             "
 
