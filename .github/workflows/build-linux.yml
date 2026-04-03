@@ -13,17 +13,9 @@ jobs:
   build-arm64:
     runs-on: ubuntu-22.04
     timeout-minutes: 30
-    # 使用 container 指令自动在 ARM64 环境中运行，避免手动 docker run 的 YAML 转义问题
-    container:
-      image: debian:11-slim
-      options: --platform linux/arm64 --cap-add SYS_ADMIN --security-opt apparmor:unconfined
 
     steps:
-      # ✅ 1. 配置 QEMU (必须在 container 之前或同级别，但 Actions 要求 runs-on 为 ubuntu)
-      # 注意：使用 container 时，GitHub 会自动处理 QEMU 模拟。为保险起见，保留 setup-qemu 在宿主机运行
-      # 但由于 runs-on 是 ubuntu，container 会覆盖环境。我们改用标准 docker run 方式以确保 100% 兼容 Actions 调度器。
-      # 修正方案：回归 docker run，但用绝对安全的写法传递脚本。
-
+      # ✅ 1. 强制释放运行器磁盘空间 (已移除 flaky 的 docker prune)
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -31,7 +23,6 @@ jobs:
           sudo rm -rf /opt/ghc
           sudo rm -rf "/usr/local/share/boost"
           sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo docker system prune -af --volumes || true
           sudo apt-get clean
           df -h
 
@@ -42,10 +33,9 @@ jobs:
         with:
           platforms: arm64
 
-      # ✅ 3. 构建 & 打包 ARM64 AppImage (绝对安全写法)
+      # ✅ 2. 构建 & 打包 ARM64 AppImage (安全脚本注入法)
       - name: Build & Package ARM64 AppImage
         run: |
-          # 1. 将完整构建脚本写入临时文件，彻底规避 YAML 解析问题
           printf '%s\n' '#!/bin/bash' 'set -ex' '' \
             'echo ">>> 1. 安装基础依赖"' \
             'apt-get update' \
@@ -126,13 +116,12 @@ jobs:
             'ls -lh /app/release/' > /tmp/build.sh
 
           chmod +x /tmp/build.sh
-          # 将脚本传入容器执行，完美避开 YAML 多行解析陷阱
           docker run --rm --platform linux/arm64 \
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
             "debian:11-slim" bash /tmp/build.sh
 
-      # ✅ 4. 上传制品
+      # ✅ 3. 上传制品
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
