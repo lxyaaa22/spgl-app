@@ -94,32 +94,24 @@ jobs:
               bash -c "for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do [ \"\$lib\" = \"libz.so\" ] && patchelf --replace-needed libz.so libz.so.1 \"\$1\"; done" _ {} \; 2>/dev/null || true' \
             '' \
             'echo ">>> 8. 创建 AppRun & Desktop"' \
-            'echo "#!/bin/sh" > AppDir/AppRun' \
-            'echo "HERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"" >> AppDir/AppRun' \
-            'echo "export LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"" >> AppDir/AppRun' \
-            'echo "exec \"\${HERE}/${APP_NAME}\" \"\$@\"" >> AppDir/AppRun' \
+            'printf "#!/bin/sh\nHERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"\nexport LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"\nexec \"\${HERE}/${APP_NAME}\" \"\$@\"\n" > AppDir/AppRun' \
             'chmod +x AppDir/AppRun' \
+            'printf "[Desktop Entry]\nType=Application\nName=${APP_NAME}\nExec=${APP_NAME}\nIcon=${APP_NAME}\nCategories=Utility;\nTerminal=false\n" > AppDir/${APP_NAME}.desktop' \
             '' \
-            '# 生成标准 desktop 文件（appimagetool 必需）' \
-            'cat > AppDir/${APP_NAME}.desktop << DESKTOP' \
-            '[Desktop Entry]' \
-            'Type=Application' \
-            'Name=${APP_NAME}' \
-            'Exec=${APP_NAME}' \
-            'Icon=${APP_NAME}' \
-            'Categories=Utility;' \
-            'DESKTOP' \
-            '' \
-            'echo ">>> 9. 检查 AppDir 体积 (验证 Electron 是否完整)"' \
+            'echo ">>> 9. 验证 AppDir 体积 (应 >100MB)"' \
             'du -sh AppDir' \
             '' \
-            'echo ">>> 10. 使用 appimagetool 封装 (1:1 保留体积，不剥离依赖)"' \
+            'echo ">>> 10. 下载并准备 appimagetool"' \
+            'curl -fsSL -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage' \
+            'chmod +x appimagetool.AppImage' \
             'export ARCH=arm64' \
-            'curl -fsSL -o appimagetool-aarch64.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage' \
-            'chmod +x appimagetool-aarch64.AppImage' \
-            './appimagetool-aarch64.AppImage AppDir release/${APP_NAME}-arm64.AppImage 2>&1 | tee /app/packaging.log' \
+            '# 💡 核心修复：提取 AppImage 避免 QEMU 模拟下的 Exec format error' \
+            './appimagetool.AppImage --appimage-extract >/dev/null 2>&1' \
             '' \
-            'echo ">>> 11. 验证最终产物"' \
+            'echo ">>> 11. 封装最终 AppImage"' \
+            './squashfs-root/AppRun AppDir release/${APP_NAME}-arm64.AppImage 2>&1 | tee /app/packaging.log' \
+            '' \
+            'echo ">>> 12. 验证并转移产物"' \
             'mkdir -p /app/release' \
             'FINAL=$(find /app/release -name "*.AppImage" | head -n 1)' \
             'if [ -z "${FINAL}" ]; then echo "❌ 打包失败"; tail -n 30 /app/packaging.log; exit 1; fi' \
@@ -131,6 +123,7 @@ jobs:
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
             "debian:11-slim" bash build.sh
+
 
 
       # ✅ 3. 上传制品
