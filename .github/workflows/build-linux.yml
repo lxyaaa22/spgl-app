@@ -30,9 +30,8 @@ jobs:
 
       - name: Build & Package ARM64 AppImage
         run: |
-          # 1. 宿主机预先创建目录，确保挂载点存在
-          mkdir -p release
-
+          mkdir -p release && chmod 777 release
+          
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/app \
             -w /app \
@@ -40,13 +39,15 @@ jobs:
           set -e
           set -x
 
+          # 安装依赖（增加 libfuse2 防 AppImage 运行异常）
           apt-get update
           apt-get install -y --no-install-recommends \
             curl build-essential python3 libudev-dev fakeroot dpkg \
             zlib1g libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
             libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-            libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file
+            libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file libfuse2
 
+          # Node.js
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           apt-get install -y --no-install-recommends nodejs
 
@@ -55,11 +56,8 @@ jobs:
           ./node_modules/.bin/electron-builder --linux dir --arm64 --publish never
 
           UNPACKED_DIR=$(ls -d /app/release/*-linux-arm64-unpacked | head -n 1)
-          if [ -z "$UNPACKED_DIR" ]; then
-            echo "❌ 未找到 electron-builder 输出"
-            ls -la /app/release/ || true
-            exit 1
-          fi
+          [ -z "$UNPACKED_DIR" ] && { echo "❌ 未找到 unpacked 目录"; ls -la /app/release/; exit 1; }
+          
           APP_NAME=$(basename "$UNPACKED_DIR" | sed 's/-linux-arm64-unpacked$//')
           mkdir -p /app/AppDir/usr/lib
           cp -r "$UNPACKED_DIR"/. /app/AppDir/
@@ -81,38 +79,46 @@ jobs:
           curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage \
             -o /app/linuxdeploy.AppImage
           chmod +x /app/linuxdeploy.AppImage
-          export APPIMAGE_EXTRACT_AND_RUN=1
 
+          # 关键：强制解压运行，避开 QEMU+FUSE 兼容性问题
+          export APPIMAGE_EXTRACT_AND_RUN=1
           cd /app
           ./linuxdeploy.AppImage \
             --appdir AppDir \
             --output appimage \
             --exclude-library '' \
             --library /usr/lib/aarch64-linux-gnu/libz.so.1 \
-            --library /usr/lib/aarch64-linux-gnu/libz.so
+            --library /usr/lib/aarch64-linux-gnu/libz.so 2>&1 | tee /app/build.log
 
-          # 🔍 精准定位并复制产物（替代 mv，避免跨挂载点权限问题）
-          APPIMAGE_FILE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
-          if [ -z "$APPIMAGE_FILE" ]; then
-            echo "❌ FATAL: linuxdeploy 未生成 AppImage"
-            ls -la /app/
+          # 🔍 容器内强制快照（定位文件真实位置）
+          echo "📸 [容器内] /app 根目录文件:"
+          ls -lh /app/
+          echo "📸 [容器内] /app/release 目录:"
+          ls -lh /app/release/ || echo "⚠️ release 目录为空"
+
+          APPIMAGE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
+          if [ -z "$APPIMAGE" ]; then
+            echo "❌ 致命错误：未生成 .AppImage 文件。查看日志尾部："
+            tail -n 30 /app/build.log
             exit 1
           fi
-          echo "✅ 找到产物: $APPIMAGE_FILE"
-          cp "$APPIMAGE_FILE" /app/release/
-          sync  # ⚡ 强制 Docker 将文件刷入宿主机磁盘
+
+          echo "✅ 找到产物: $APPIMAGE"
+          cp -v "$APPIMAGE" /app/release/
+          sync
+          echo "✅ 已强制同步到宿主机挂载卷"
           DOCKER_SCRIPT
 
-      # 🔎 调试验证（必看）
-      - name: Debug Release Dir
+      - name: Debug Host Release
         run: |
-          echo "📂 宿主机 release 目录:"
-          ls -lh release/ || echo "⚠️ 目录为空"
-          find . -maxdepth 2 -name "*.AppImage" -exec du -h {} \; || echo "⚠️ 未找到"
+          echo "🌍 [宿主机] release 目录最终状态:"
+          ls -lh release/ || echo "⚠️ 仍为空"
+          find . -name "*.AppImage" -exec du -h {} \; 2>/dev/null || true
 
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
           path: release/*.AppImage
-          if-no-files-found: error  # 关键：匹配失败直接中断，拒绝假成功
+          if-no-files-found: error
+
 
