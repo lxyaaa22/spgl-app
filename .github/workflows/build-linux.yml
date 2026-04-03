@@ -15,7 +15,7 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # ✅ 1. 强制释放运行器磁盘空间 (已移除 flaky 的 docker prune)
+      # ✅ 1. 强制释放运行器磁盘空间 (移除 flaky 的 docker prune)
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -33,10 +33,9 @@ jobs:
         with:
           platforms: arm64
 
- # ✅ 3. 构建 & 打包 ARM64 AppImage
+      # ✅ 2. 构建 & 打包 ARM64 AppImage (安全脚本注入法)
       - name: Build & Package ARM64 AppImage
         run: |
-          # 💡 修复：将脚本写入当前工作目录（已映射到容器的 /app），而非宿主机的 /tmp
           printf '%s\n' '#!/bin/bash' 'set -ex' '' \
             'echo ">>> 1. 安装基础依赖"' \
             'apt-get update' \
@@ -81,21 +80,31 @@ jobs:
             'cp -r "${UNPACKED_DIR}/." AppDir/' \
             'chmod +x "AppDir/${APP_NAME}"' \
             '' \
-            'echo ">>> 6. 修复 libz 依赖"' \
-            'LIBZ_PATH=$(find /usr/lib /lib -name "libz.so.1" -type f 2>/dev/null | head -n 1)' \
-            'if [ -z "${LIBZ_PATH}" ]; then apt-get install -y --reinstall zlib1g:arm64; LIBZ_PATH=$(find /usr/lib /lib -name "libz.so.1" -type f 2>/dev/null | head -n 1); fi' \
-            'if [ -z "${LIBZ_PATH}" ]; then echo "❌ 找不到 libz.so.1"; exit 1; fi' \
+            'echo ">>> 6. 修复 libz 依赖 (使用 dpkg 精准定位)"' \
+            'LIBZ_PATH="/usr/lib/aarch64-linux-gnu/libz.so.1"' \
+            'if [ ! -f "${LIBZ_PATH}" ]; then' \
+            '  LIBZ_PATH=$(dpkg -L zlib1g:arm64 2>/dev/null | grep libz.so | head -n 1)' \
+            'fi' \
+            'if [ -z "${LIBZ_PATH}" ] || [ ! -f "${LIBZ_PATH}" ]; then' \
+            '  echo "❌ 找不到 libz.so.1，已安装但路径异常，打印 dpkg 列表:"' \
+            '  dpkg -L zlib1g:arm64 2>/dev/null || true' \
+            '  exit 1' \
+            'fi' \
+            'echo "✅ 找到 libz: ${LIBZ_PATH}"' \
             'cp "${LIBZ_PATH}" AppDir/usr/lib/' \
             'ln -sf libz.so.1 AppDir/usr/lib/libz.so' \
             '' \
-            'echo ">>> 7. 修复 RPATH"' \
+            'echo ">>> 7. 修复 RPATH 与依赖链接"' \
             'find AppDir -type f \( -name "*.so*" -o -name "*.node" -o -name "${APP_NAME}" \) -exec \
               patchelf --set-rpath "\$ORIGIN/../usr/lib:\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu" {} \; 2>/dev/null || true' \
             'find AppDir -type f \( -name "*.so*" -o -name "*.node" -o -name "${APP_NAME}" \) -exec \
               bash -c "for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do [ \"\$lib\" = \"libz.so\" ] && patchelf --replace-needed libz.so libz.so.1 \"\$1\"; done" _ {} \; 2>/dev/null || true' \
             '' \
             'echo ">>> 8. 创建 AppRun"' \
-            'printf "#!/bin/sh\nHERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"\nexport LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"\nexec \"\${HERE}/%s\" \"\$@\"\n" "${APP_NAME}" > AppDir/AppRun' \
+            'echo "#!/bin/sh" > AppDir/AppRun' \
+            'echo "HERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"" >> AppDir/AppRun' \
+            'echo "export LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"" >> AppDir/AppRun' \
+            'echo "exec \"\${HERE}/${APP_NAME}\" \"\$@\"" >> AppDir/AppRun' \
             'chmod +x AppDir/AppRun' \
             '' \
             'echo ">>> 9. 运行 linuxdeploy 打包"' \
@@ -117,7 +126,6 @@ jobs:
             'ls -lh /app/release/' > build.sh
 
           chmod +x build.sh
-          # 💡 修复：直接执行已挂载到容器 /app 目录下的 build.sh
           docker run --rm --platform linux/arm64 \
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
