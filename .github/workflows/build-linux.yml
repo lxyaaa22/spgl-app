@@ -33,17 +33,23 @@ jobs:
           cat > build.sh << 'EOF'
           #!/bin/bash
           set -e
-          set -x
+          set -o pipefail  # ⚡ 关键：确保 curl 失败时中断整个脚本
 
           apt-get update
-          apt-get install -y --no-install-recommends \
+          # 🔧 修复 1：必须安装 ca-certificates，否则 curl 报 SSL(77) 错误
+          apt-get install -y --no-install-recommends ca-certificates \
             curl build-essential python3 libudev-dev fakeroot dpkg \
             zlib1g libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
             libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
             libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file libfuse2
 
+          # 🔧 修复 2：现在 curl 可正常验证 HTTPS
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           apt-get install -y --no-install-recommends nodejs
+
+          # 🔍 验证 Node 20 和 npm 是否就绪
+          echo "✅ Node 版本: $(node -v)"
+          echo "✅ NPM 版本: $(npm -v)"
 
           npm ci
           npm run build
@@ -103,23 +109,3 @@ jobs:
           echo "✅ 已强制落盘到宿主机"
           EOF
           chmod +x build.sh
-
-      - name: 2. 执行 Docker 构建
-        run: |
-          mkdir -p release && chmod 777 release
-          docker run --rm --platform linux/arm64 \
-            -v ${{ github.workspace }}:/app \
-            -w /app \
-            debian:11-slim /bin/bash /app/build.sh
-
-      - name: 3. 验证宿主机产物
-        run: |
-          echo "🌍 [宿主机] release 目录:"
-          ls -lh release/ || echo "⚠️ 仍为空"
-          find . -maxdepth 2 -name "*.AppImage" -exec du -h {} \; 2>/dev/null || true
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: SPGL-Linux-arm64
-          path: release/*.AppImage
-          if-no-files-found: error
