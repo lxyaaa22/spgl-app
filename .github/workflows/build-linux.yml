@@ -15,7 +15,6 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # ✅ 1. 强制释放运行器磁盘空间 (移除 flaky 的 docker prune)
       - name: Free Disk Space
         run: |
           sudo rm -rf /usr/share/dotnet
@@ -33,7 +32,7 @@ jobs:
         with:
           platforms: arm64
 
-      # ✅ 3. 构建 & 打包 ARM64 AppImage
+      # ✅ 3. 构建 & 打包 ARM64 AppImage (纯文件拼装法，彻底绕过 QEMU 执行限制)
       - name: Build & Package ARM64 AppImage
         run: |
           printf '%s\n' '#!/bin/bash' 'set -ex' '' \
@@ -45,7 +44,7 @@ jobs:
               libatk1.0-0:arm64 libatk-bridge2.0-0:arm64 libcups2:arm64 libdrm2:arm64 \
               libxkbcommon0:arm64 libxcomposite1:arm64 libxdamage1:arm64 libxrandr2:arm64 \
               libgbm1:arm64 libpango-1.0-0:arm64 libcairo2:arm64 libasound2:arm64 libxss1:arm64 \
-              patchelf:arm64 file fuse xz-utils desktop-file-utils' \
+              patchelf:arm64 file fuse xz-utils squashfs-tools desktop-file-utils' \
             'update-ca-certificates' \
             '' \
             'echo ">>> 2. 安装 Node.js 20"' \
@@ -101,20 +100,16 @@ jobs:
             'echo ">>> 9. 验证 AppDir 体积 (应 >100MB)"' \
             'du -sh AppDir' \
             '' \
-            'echo ">>> 10. 下载并准备 appimagetool"' \
-            'curl -fsSL -o appimagetool.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage' \
-            'chmod +x appimagetool.AppImage' \
-            'export ARCH=arm64' \
-            '# 💡 核心修复：提取 AppImage 避免 QEMU 模拟下的 Exec format error' \
-            './appimagetool.AppImage --appimage-extract >/dev/null 2>&1' \
+            'echo ">>> 10. 使用 mksquashfs + Runtime 拼装 (100% 兼容 QEMU)"' \
+            'curl -fsSL -o runtime-aarch64 https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-aarch64' \
+            'mksquashfs AppDir payload.squashfs -comp xz -root-owned -noappend -no-xattrs' \
+            'cat runtime-aarch64 payload.squashfs > /app/release/${APP_NAME}-arm64.AppImage' \
+            'chmod +x /app/release/${APP_NAME}-arm64.AppImage' \
+            'rm -f runtime-aarch64 payload.squashfs' \
             '' \
-            'echo ">>> 11. 封装最终 AppImage"' \
-            './squashfs-root/AppRun AppDir release/${APP_NAME}-arm64.AppImage 2>&1 | tee /app/packaging.log' \
-            '' \
-            'echo ">>> 12. 验证并转移产物"' \
-            'mkdir -p /app/release' \
+            'echo ">>> 11. 验证最终产物"' \
             'FINAL=$(find /app/release -name "*.AppImage" | head -n 1)' \
-            'if [ -z "${FINAL}" ]; then echo "❌ 打包失败"; tail -n 30 /app/packaging.log; exit 1; fi' \
+            'if [ -z "${FINAL}" ]; then echo "❌ 打包失败"; exit 1; fi' \
             'echo "✅ 成功生成: $(basename ${FINAL}) [体积: $(du -h ${FINAL} | cut -f1)]"' \
             'ls -lh /app/release/' > build.sh
 
@@ -124,9 +119,6 @@ jobs:
             -w /app \
             "debian:11-slim" bash build.sh
 
-
-
-      # ✅ 3. 上传制品
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
