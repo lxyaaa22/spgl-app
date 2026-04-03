@@ -33,7 +33,7 @@ jobs:
         with:
           platforms: arm64
 
-      # ✅ 2. 构建 & 打包 ARM64 AppImage (安全脚本注入法)
+      # ✅ 3. 构建 & 打包 ARM64 AppImage
       - name: Build & Package ARM64 AppImage
         run: |
           printf '%s\n' '#!/bin/bash' 'set -ex' '' \
@@ -45,7 +45,7 @@ jobs:
               libatk1.0-0:arm64 libatk-bridge2.0-0:arm64 libcups2:arm64 libdrm2:arm64 \
               libxkbcommon0:arm64 libxcomposite1:arm64 libxdamage1:arm64 libxrandr2:arm64 \
               libgbm1:arm64 libpango-1.0-0:arm64 libcairo2:arm64 libasound2:arm64 libxss1:arm64 \
-              patchelf:arm64 file fuse xz-utils' \
+              patchelf:arm64 file fuse xz-utils desktop-file-utils' \
             'update-ca-certificates' \
             '' \
             'echo ">>> 2. 安装 Node.js 20"' \
@@ -80,17 +80,10 @@ jobs:
             'cp -r "${UNPACKED_DIR}/." AppDir/' \
             'chmod +x "AppDir/${APP_NAME}"' \
             '' \
-            'echo ">>> 6. 修复 libz 依赖 (使用 dpkg 精准定位)"' \
+            'echo ">>> 6. 修复 libz 依赖"' \
             'LIBZ_PATH="/usr/lib/aarch64-linux-gnu/libz.so.1"' \
-            'if [ ! -f "${LIBZ_PATH}" ]; then' \
-            '  LIBZ_PATH=$(dpkg -L zlib1g:arm64 2>/dev/null | grep libz.so | head -n 1)' \
-            'fi' \
-            'if [ -z "${LIBZ_PATH}" ] || [ ! -f "${LIBZ_PATH}" ]; then' \
-            '  echo "❌ 找不到 libz.so.1，已安装但路径异常，打印 dpkg 列表:"' \
-            '  dpkg -L zlib1g:arm64 2>/dev/null || true' \
-            '  exit 1' \
-            'fi' \
-            'echo "✅ 找到 libz: ${LIBZ_PATH}"' \
+            'if [ ! -f "${LIBZ_PATH}" ]; then LIBZ_PATH=$(dpkg -L zlib1g:arm64 2>/dev/null | grep libz.so | head -n 1); fi' \
+            'if [ -z "${LIBZ_PATH}" ] || [ ! -f "${LIBZ_PATH}" ]; then echo "❌ 找不到 libz.so.1"; exit 1; fi' \
             'cp "${LIBZ_PATH}" AppDir/usr/lib/' \
             'ln -sf libz.so.1 AppDir/usr/lib/libz.so' \
             '' \
@@ -100,29 +93,37 @@ jobs:
             'find AppDir -type f \( -name "*.so*" -o -name "*.node" -o -name "${APP_NAME}" \) -exec \
               bash -c "for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do [ \"\$lib\" = \"libz.so\" ] && patchelf --replace-needed libz.so libz.so.1 \"\$1\"; done" _ {} \; 2>/dev/null || true' \
             '' \
-            'echo ">>> 8. 创建 AppRun"' \
+            'echo ">>> 8. 创建 AppRun & Desktop"' \
             'echo "#!/bin/sh" > AppDir/AppRun' \
             'echo "HERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"" >> AppDir/AppRun' \
             'echo "export LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"" >> AppDir/AppRun' \
             'echo "exec \"\${HERE}/${APP_NAME}\" \"\$@\"" >> AppDir/AppRun' \
             'chmod +x AppDir/AppRun' \
             '' \
-            'echo ">>> 9. 运行 linuxdeploy 打包"' \
-            'curl -fsSL -o linuxdeploy-aarch64.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage' \
-            'chmod +x linuxdeploy-aarch64.AppImage' \
-            'DEPLOY_ARGS="--appdir AppDir --output appimage"' \
-            'DESKTOP_FILE=$(find AppDir -name "*.desktop" -print -quit)' \
-            'ICON_FILE=$(find AppDir \( -name "*.png" -o -name "*.svg" -o -name "*.xpm" \) -print -quit)' \
-            '[ -n "${DESKTOP_FILE}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --desktop-file ${DESKTOP_FILE}"' \
-            '[ -n "${ICON_FILE}" ] && DEPLOY_ARGS="${DEPLOY_ARGS} --icon-file ${ICON_FILE}"' \
-            './linuxdeploy-aarch64.AppImage ${DEPLOY_ARGS} 2>&1 | tee /app/linuxdeploy.log' \
+            '# 生成标准 desktop 文件（appimagetool 必需）' \
+            'cat > AppDir/${APP_NAME}.desktop << DESKTOP' \
+            '[Desktop Entry]' \
+            'Type=Application' \
+            'Name=${APP_NAME}' \
+            'Exec=${APP_NAME}' \
+            'Icon=${APP_NAME}' \
+            'Categories=Utility;' \
+            'DESKTOP' \
             '' \
-            'echo ">>> 10. 验证并转移产物"' \
+            'echo ">>> 9. 检查 AppDir 体积 (验证 Electron 是否完整)"' \
+            'du -sh AppDir' \
+            '' \
+            'echo ">>> 10. 使用 appimagetool 封装 (1:1 保留体积，不剥离依赖)"' \
+            'export ARCH=arm64' \
+            'curl -fsSL -o appimagetool-aarch64.AppImage https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-aarch64.AppImage' \
+            'chmod +x appimagetool-aarch64.AppImage' \
+            './appimagetool-aarch64.AppImage AppDir release/${APP_NAME}-arm64.AppImage 2>&1 | tee /app/packaging.log' \
+            '' \
+            'echo ">>> 11. 验证最终产物"' \
             'mkdir -p /app/release' \
-            'APPIMAGE=$(find /app -maxdepth 1 -name "*.AppImage" -print -quit)' \
-            'if [ -z "${APPIMAGE}" ]; then echo "❌ 打包失败"; tail -n 50 /app/linuxdeploy.log; exit 1; fi' \
-            'echo "✅ 成功生成: $(basename ${APPIMAGE})"' \
-            'mv "${APPIMAGE}" /app/release/' \
+            'FINAL=$(find /app/release -name "*.AppImage" | head -n 1)' \
+            'if [ -z "${FINAL}" ]; then echo "❌ 打包失败"; tail -n 30 /app/packaging.log; exit 1; fi' \
+            'echo "✅ 成功生成: $(basename ${FINAL}) [体积: $(du -h ${FINAL} | cut -f1)]"' \
             'ls -lh /app/release/' > build.sh
 
           chmod +x build.sh
@@ -130,6 +131,7 @@ jobs:
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
             "debian:11-slim" bash build.sh
+
 
       # ✅ 3. 上传制品
       - uses: actions/upload-artifact@v4
