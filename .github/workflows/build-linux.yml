@@ -95,13 +95,27 @@ jobs:
               --library /usr/lib/aarch64-linux-gnu/libz.so.1 \
               --library /usr/lib/aarch64-linux-gnu/libz.so
 
-            echo "✅ 移动产物..."
-            mv *.AppImage release/ 2>/dev/null || true
+            APPIMAGE_FILE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
+            if [ -z "$APPIMAGE_FILE" ]; then
+              echo "❌ 错误：未找到生成的 AppImage 文件"
+              ls -la /app/ || true
+              exit 1
+            fi
+            mkdir -p /app/release
+            mv "$APPIMAGE_FILE" /app/release/
+            echo "✅ 成功打包: $(basename "$APPIMAGE_FILE")"
             DOCKER_SCRIPT
 
+      # 🔎 调试验证步骤（确认文件已同步到宿主机）
+      - name: Verify Artifact on Host
+        run: |
+          echo "📂 宿主机 release 目录内容:"
+          ls -lh release/ || echo "⚠️ 目录为空"
+          find . -name "*.AppImage" -exec du -h {} \; || echo "⚠️ 未匹配到文件"
 
-
+      # 📤 上传产物（强制报错模式）
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
           path: release/*.AppImage
+          if-no-files-found: error  # ⚡ 关键：匹配不到文件时直接失败，拒绝“假成功”
