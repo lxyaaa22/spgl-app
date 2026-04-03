@@ -35,7 +35,6 @@ jobs:
         run: |
           set -e
 
-          # 定义变量
           DOCKER_IMAGE="debian:11-slim"
           WORKSPACE="/app"
           
@@ -45,12 +44,12 @@ jobs:
             ${DOCKER_IMAGE} bash -c "
               set -e
               
-              echo '>>> 1. 安装基础依赖和工具链'
+              echo '>>> 1. 安装基础系统依赖'
               apt-get update
-              # 安装关键依赖：zlib1g (运行时), zlib1g-dev (开发时), patchelf, file, fakeroot
-              # 注意：debian:11 是 Bullseye，glibc 版本较新但比 Ubuntu 22.04 旧，兼容性更好
+              # 安装构建工具和库依赖
               apt-get install -y --no-install-recommends \
                 curl \
+                wget \
                 build-essential \
                 python3 \
                 libudev-dev \
@@ -75,14 +74,26 @@ jobs:
                 libxss1 \
                 patchelf \
                 file \
-                wget \
-                fuse
+                fuse \
+                xz-utils
 
-              echo '>>> 2. 安装 Node.js 20'
-              curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-              apt-get install -y --no-install-recommends nodejs
+              echo '>>> 2. 手动安装 Node.js 20 (ARM64)'
+              # 直接从 nodejs.org 下载预编译的 ARM64 二进制包，避免 apt 源问题
+              NODE_VERSION=20.11.0
+              ARCH=arm64
+              NODE_DIST=node-v\${NODE_VERSION}-linux-\${ARCH}
+              
+              echo \"Downloading Node.js \${NODE_VERSION} for \${ARCH}...\"
+              wget https://nodejs.org/dist/v\${NODE_VERSION}/\${NODE_DIST}.tar.xz
+              tar -xf \${NODE_DIST}.tar.xz -C /usr/local --strip-components=1
+              rm -f \${NODE_DIST}.tar.xz
+              
+              # 验证安装
+              node -v
+              npm -v
 
               echo '>>> 3. 构建项目'
+              # 使用 npm ci 确保依赖一致
               npm ci
               npm run build
 
@@ -128,12 +139,10 @@ jobs:
 
               echo '>>> 7. 修复二进制文件的 RPATH 和依赖'
               # 使用 patchelf 确保所有二进制文件都能找到 AppDir/usr/lib 中的库
-              # 首先，将 AppDir/usr/lib 添加到所有二进制文件的 rpath
               find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name '\${APP_NAME}' \) -exec \
                 patchelf --set-rpath '\\\$ORIGIN/../usr/lib:\\\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu' {} \; 2>/dev/null || true
 
               # 特别处理：确保没有任何二进制文件硬编码依赖 libz.so (不带版本号)
-              # 如果有，将其改为 libz.so.1
               find AppDir -type f \( -name '*.so*' -o -name '*.node' -o -name '\${APP_NAME}' \) -exec \
                 bash -c 'for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do if [ \"\$lib\" = \"libz.so\" ]; then patchelf --replace-needed libz.so libz.so.1 \"\$1\"; fi; done' _ {} \; 2>/dev/null || true
 
@@ -152,8 +161,6 @@ jobs:
               wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage
               chmod +x linuxdeploy-aarch64.AppImage
               
-              # 关键：使用 --plugin gtk 或其他插件可能有助于依赖解析，但这里我们手动管理
-              # --exclude-library 避免重复打包系统已存在的库，但我们明确 include libz
               ./linuxdeploy-aarch64.AppImage \
                 --appdir AppDir \
                 --output appimage \
