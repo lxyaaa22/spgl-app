@@ -33,9 +33,10 @@ jobs:
         with:
           platforms: arm64
 
-      # ✅ 2. 构建 & 打包 ARM64 AppImage (安全脚本注入法)
+ # ✅ 3. 构建 & 打包 ARM64 AppImage
       - name: Build & Package ARM64 AppImage
         run: |
+          # 💡 修复：将脚本写入当前工作目录（已映射到容器的 /app），而非宿主机的 /tmp
           printf '%s\n' '#!/bin/bash' 'set -ex' '' \
             'echo ">>> 1. 安装基础依赖"' \
             'apt-get update' \
@@ -113,13 +114,14 @@ jobs:
             'if [ -z "${APPIMAGE}" ]; then echo "❌ 打包失败"; tail -n 50 /app/linuxdeploy.log; exit 1; fi' \
             'echo "✅ 成功生成: $(basename ${APPIMAGE})"' \
             'mv "${APPIMAGE}" /app/release/' \
-            'ls -lh /app/release/' > /tmp/build.sh
+            'ls -lh /app/release/' > build.sh
 
-          chmod +x /tmp/build.sh
+          chmod +x build.sh
+          # 💡 修复：直接执行已挂载到容器 /app 目录下的 build.sh
           docker run --rm --platform linux/arm64 \
             -v ${GITHUB_WORKSPACE}:/app \
             -w /app \
-            "debian:11-slim" bash /tmp/build.sh
+            "debian:11-slim" bash build.sh
 
       # ✅ 3. 上传制品
       - uses: actions/upload-artifact@v4
