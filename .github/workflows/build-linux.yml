@@ -44,7 +44,7 @@ jobs:
             ${DOCKER_IMAGE} bash -c "
               set -e
               
-              echo '>>> 1. 安装基础系统依赖 (包含 ca-certificates 修复 HTTPS 证书问题)'
+              echo '>>> 1. 安装基础系统依赖'
               apt-get update
               apt-get install -y --no-install-recommends \
                 curl \
@@ -76,8 +76,6 @@ jobs:
                 file \
                 fuse \
                 xz-utils
-
-              # 更新证书库（确保新安装的证书生效）
               update-ca-certificates
 
               echo '>>> 2. 手动安装 Node.js 20 (ARM64)'
@@ -86,14 +84,11 @@ jobs:
               NODE_DIST=node-v\${NODE_VERSION}-linux-\${ARCH}
               
               echo \"Downloading Node.js \${NODE_VERSION} for \${ARCH}...\"
-              # 使用 curl 替代 wget，通常对 TLS 握手兼容性更好
               curl -fsSL https://nodejs.org/dist/v\${NODE_VERSION}/\${NODE_DIST}.tar.xz -o node.tar.xz
               tar -xf node.tar.xz -C /usr/local --strip-components=1
               rm -f node.tar.xz
               
-              # 验证安装
-              echo 'Node.js version:' && node -v
-              echo 'npm version:' && npm -v
+              echo 'Node.js:' \$(node -v) '| npm:' \$(npm -v)
 
               echo '>>> 3. 构建项目'
               npm ci
@@ -103,15 +98,20 @@ jobs:
               npx electron-builder --linux dir --arm64 --publish never
 
               echo '>>> 5. 准备 AppDir 结构'
-              UNPACKED_DIR=\$(ls -d release/*-linux-arm64-unpacked)
-              APP_NAME=\$(basename \"\${UNPACKED_DIR}\" | sed 's/-linux-arm64-unpacked//')
+              # 🔍 使用 find 替代 ls glob，兼容不同 electron-builder 版本
+              UNPACKED_DIR=\$(find release dist -maxdepth 1 -type d -name '*-unpacked' 2>/dev/null | head -n 1)
+              if [ -z \"\${UNPACKED_DIR}\" ]; then
+                  echo \"❌ 未找到 unpacked 目录，检查输出文件夹：\"
+                  ls -la release/ 2>/dev/null || ls -la dist/ 2>/dev/null || echo \"无输出目录\"
+                  exit 1
+              fi
+              echo \"✅ 找到目录: \${UNPACKED_DIR}\"
               
-              echo \"Found unpacked dir: \${UNPACKED_DIR}\"
-              echo \"App Name: \${APP_NAME}\"
+              APP_NAME=\$(basename \"\${UNPACKED_DIR}\" | sed 's/-linux-arm64-unpacked$//')
+              echo \"✅ 提取应用名: \${APP_NAME}\"
 
               mkdir -p AppDir/usr/lib
               mkdir -p AppDir/usr/bin
-              
               cp -r \"\${UNPACKED_DIR}/.\" AppDir/
               chmod +x \"AppDir/\${APP_NAME}\"
 
@@ -120,7 +120,6 @@ jobs:
               LIBZ_LINK=/usr/lib/aarch64-linux-gnu/libz.so
               
               if [ -f \"\${LIBZ_PATH}\" ]; then
-                echo \"Copying \${LIBZ_PATH} to AppDir/usr/lib/\"
                 cp \"\${LIBZ_PATH}\" AppDir/usr/lib/
                 if [ -L \"\${LIBZ_LINK}\" ]; then
                   cp -d \"\${LIBZ_LINK}\" AppDir/usr/lib/ || true
@@ -128,7 +127,7 @@ jobs:
                   cd AppDir/usr/lib && ln -sf libz.so.1 libz.so && cd -
                 fi
               else
-                echo \"ERROR: libz.so.1 not found in system!\"
+                echo \"ERROR: libz.so.1 not found!\"
                 exit 1
               fi
 
@@ -163,8 +162,9 @@ jobs:
                 2>&1 | tee linuxdeploy.log
 
               echo '>>> 10. 移动产物'
-              mv *.AppImage release/ || true
-              ls -lh release/
+              mv *.AppImage release/ 2>/dev/null || true
+              echo '✅ 打包完成，产物列表：'
+              ls -lh release/*.AppImage 2>/dev/null || ls -lh release/
             "
 
       # ✅ 4. 上传制品
