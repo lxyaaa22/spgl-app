@@ -30,92 +30,89 @@ jobs:
 
       - name: Build & Package ARM64 AppImage
         run: |
+          # 1. 宿主机预先创建目录，确保挂载点存在
+          mkdir -p release
+
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/app \
             -w /app \
             debian:11-slim /bin/bash << 'DOCKER_SCRIPT'
-            set -e
-            set -x
+          set -e
+          set -x
 
-            echo "🔧 安装基础依赖..."
-            apt-get update
-            apt-get install -y --no-install-recommends \
-              curl build-essential python3 libudev-dev fakeroot dpkg \
-              zlib1g libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
-              libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
-              libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            curl build-essential python3 libudev-dev fakeroot dpkg \
+            zlib1g libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
+            libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
+            libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file
 
-            echo "📦 安装 Node.js 20..."
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
-            apt-get install -y --no-install-recommends nodejs
+          curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+          apt-get install -y --no-install-recommends nodejs
 
-            echo "🛠 编译项目..."
-            npm ci
-            npm run build
-            ./node_modules/.bin/electron-builder --linux dir --arm64 --publish never
+          npm ci
+          npm run build
+          ./node_modules/.bin/electron-builder --linux dir --arm64 --publish never
 
-            echo "📂 准备 AppDir..."
-            UNPACKED_DIR=$(ls -d release/*-linux-arm64-unpacked | head -n 1)
-            if [ -z "$UNPACKED_DIR" ]; then
-              echo "❌ 未找到 electron-builder 输出目录"
-              ls -la release/ || true
-              exit 1
-            fi
-            APP_NAME=$(basename "$UNPACKED_DIR" | sed 's/-linux-arm64-unpacked$//')
-            mkdir -p AppDir/usr/lib
-            cp -r "$UNPACKED_DIR"/. AppDir/
-            chmod +x "AppDir/$APP_NAME"
+          UNPACKED_DIR=$(ls -d /app/release/*-linux-arm64-unpacked | head -n 1)
+          if [ -z "$UNPACKED_DIR" ]; then
+            echo "❌ 未找到 electron-builder 输出"
+            ls -la /app/release/ || true
+            exit 1
+          fi
+          APP_NAME=$(basename "$UNPACKED_DIR" | sed 's/-linux-arm64-unpacked$//')
+          mkdir -p /app/AppDir/usr/lib
+          cp -r "$UNPACKED_DIR"/. /app/AppDir/
+          chmod +x "/app/AppDir/$APP_NAME"
 
-            echo "🔗 修复 libz 依赖..."
-            cp /usr/lib/aarch64-linux-gnu/libz.so.1 AppDir/usr/lib/
-            ln -sf libz.so.1 AppDir/usr/lib/libz.so
+          cp /usr/lib/aarch64-linux-gnu/libz.so.1 /app/AppDir/usr/lib/
+          ln -sf libz.so.1 /app/AppDir/usr/lib/libz.so
 
-            # 安全替换 DT_NEEDED，避免转义错误
-            find AppDir -type f \( -name '*.node' -o -name "$APP_NAME" \) -print0 | \
-              xargs -0 -I{} patchelf --replace-needed libz.so libz.so.1 {} 2>/dev/null || true
+          find /app/AppDir -type f \( -name '*.node' -o -name "$APP_NAME" \) -print0 | \
+            xargs -0 -I{} patchelf --replace-needed libz.so libz.so.1 {} 2>/dev/null || true
 
-            echo "🚀 生成 AppRun..."
-            cat > AppDir/AppRun << 'APPRUN_EOF'
-            #!/bin/sh
-            HERE="$(dirname "$(readlink -f "$0")")"
-            exec "${HERE}/$(basename "${HERE}")" "$@"
-            APPRUN_EOF
-            chmod +x AppDir/AppRun
+          cat > /app/AppDir/AppRun << 'APPRUN_EOF'
+          #!/bin/sh
+          HERE="$(dirname "$(readlink -f "$0")")"
+          exec "${HERE}/$(basename "${HERE}")" "$@"
+          APPRUN_EOF
+          chmod +x /app/AppDir/AppRun
 
-            echo "📦 打包 AppImage..."
-            curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage \
-              -o linuxdeploy.AppImage
-            chmod +x linuxdeploy.AppImage
-            export APPIMAGE_EXTRACT_AND_RUN=1
+          curl -fsSL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-aarch64.AppImage \
+            -o /app/linuxdeploy.AppImage
+          chmod +x /app/linuxdeploy.AppImage
+          export APPIMAGE_EXTRACT_AND_RUN=1
 
-            ./linuxdeploy.AppImage \
-              --appdir AppDir \
-              --output appimage \
-              --exclude-library '' \
-              --library /usr/lib/aarch64-linux-gnu/libz.so.1 \
-              --library /usr/lib/aarch64-linux-gnu/libz.so
+          cd /app
+          ./linuxdeploy.AppImage \
+            --appdir AppDir \
+            --output appimage \
+            --exclude-library '' \
+            --library /usr/lib/aarch64-linux-gnu/libz.so.1 \
+            --library /usr/lib/aarch64-linux-gnu/libz.so
 
-            APPIMAGE_FILE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
-            if [ -z "$APPIMAGE_FILE" ]; then
-              echo "❌ 错误：未找到生成的 AppImage 文件"
-              ls -la /app/ || true
-              exit 1
-            fi
-            mkdir -p /app/release
-            mv "$APPIMAGE_FILE" /app/release/
-            echo "✅ 成功打包: $(basename "$APPIMAGE_FILE")"
-            DOCKER_SCRIPT
+          # 🔍 精准定位并复制产物（替代 mv，避免跨挂载点权限问题）
+          APPIMAGE_FILE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
+          if [ -z "$APPIMAGE_FILE" ]; then
+            echo "❌ FATAL: linuxdeploy 未生成 AppImage"
+            ls -la /app/
+            exit 1
+          fi
+          echo "✅ 找到产物: $APPIMAGE_FILE"
+          cp "$APPIMAGE_FILE" /app/release/
+          sync  # ⚡ 强制 Docker 将文件刷入宿主机磁盘
+          DOCKER_SCRIPT
 
-      # 🔎 调试验证步骤（确认文件已同步到宿主机）
-      - name: Verify Artifact on Host
+      # 🔎 调试验证（必看）
+      - name: Debug Release Dir
         run: |
-          echo "📂 宿主机 release 目录内容:"
+          echo "📂 宿主机 release 目录:"
           ls -lh release/ || echo "⚠️ 目录为空"
-          find . -name "*.AppImage" -exec du -h {} \; || echo "⚠️ 未匹配到文件"
+          find . -maxdepth 2 -name "*.AppImage" -exec du -h {} \; || echo "⚠️ 未找到"
 
-      # 📤 上传产物（强制报错模式）
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
           path: release/*.AppImage
-          if-no-files-found: error  # ⚡ 关键：匹配不到文件时直接失败，拒绝“假成功”
+          if-no-files-found: error  # 关键：匹配失败直接中断，拒绝假成功
+
