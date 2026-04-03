@@ -1,4 +1,5 @@
-name: Build Linux ARM64
+name: Build Linux ARM64 AppImage
+
 on:
   push:
     branches: [ "main" ]
@@ -8,58 +9,43 @@ jobs:
   build-arm64:
     runs-on: ubuntu-22.04
     steps:
-      # ✅ 1. 强制释放运行器磁盘空间（关键步骤）
+      # 1. 清理 Runner 磁盘
       - name: Free Disk Space
         run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc "/usr/local/share/boost" "$AGENT_TOOLSDIRECTORY"
           sudo docker system prune -af --volumes
           sudo apt-get clean
           df -h
 
+      # 2. 检出代码
       - uses: actions/checkout@v4
 
-      # ✅ 2. 使用 npm ci 替代 npm install（更快、更省空间）
+      # 3. 配置 QEMU
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
         with:
           platforms: arm64
 
-      - name: 1. 生成构建脚本
+      # 4. 生成构建脚本（规避 Heredoc 解析陷阱）
+      - name: Generate Build Script
         run: |
-          cat > build.sh << 'EOF'
+          cat > build.sh << 'OUTER_EOF'
           #!/bin/bash
           set -e
-          set -o pipefail  # ⚡ 关键：确保 curl 失败时中断整个脚本
-
+          set -o pipefail
           apt-get update
-          # 🔧 修复 1：必须安装 ca-certificates，否则 curl 报 SSL(77) 错误
           apt-get install -y --no-install-recommends ca-certificates \
             curl build-essential python3 libudev-dev fakeroot dpkg \
             zlib1g libglib2.0-0 libnss3 libatk1.0-0 libatk-bridge2.0-0 libcups2 \
             libdrm2 libxkbcommon0 libxcomposite1 libxdamage1 libxrandr2 libgbm1 \
             libpango-1.0-0 libcairo2 libasound2 libxss1 patchelf file libfuse2
-
-          # 🔧 修复 2：现在 curl 可正常验证 HTTPS
           curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
           apt-get install -y --no-install-recommends nodejs
-
-          # 🔍 验证 Node 20 和 npm 是否就绪
-          echo "✅ Node 版本: $(node -v)"
-          echo "✅ NPM 版本: $(npm -v)"
-
           npm ci
           npm run build
           ./node_modules/.bin/electron-builder --linux dir --arm64 --publish never
 
           UNPACKED_DIR=$(ls -d /app/release/*-linux-arm64-unpacked | head -n 1)
-          if [ -z "$UNPACKED_DIR" ]; then
-            echo "❌ 未找到 unpacked 目录"; ls -la /app/release/; exit 1
-          fi
-
           APP_NAME=$(basename "$UNPACKED_DIR" | sed 's/-linux-arm64-unpacked$//')
           mkdir -p /app/AppDir/usr/lib
           cp -r "$UNPACKED_DIR"/. /app/AppDir/
@@ -67,7 +53,6 @@ jobs:
 
           cp /usr/lib/aarch64-linux-gnu/libz.so.1 /app/AppDir/usr/lib/
           ln -sf libz.so.1 /app/AppDir/usr/lib/libz.so
-
           find /app/AppDir -type f \( -name '*.node' -o -name "$APP_NAME" \) -print0 | \
             xargs -0 -I{} patchelf --replace-needed libz.so libz.so.1 {} 2>/dev/null || true
 
@@ -91,21 +76,52 @@ jobs:
             --library /usr/lib/aarch64-linux-gnu/libz.so.1 \
             --library /usr/lib/aarch64-linux-gnu/libz.so 2>&1 | tee /app/build.log
 
-          echo "📸 [容器内快照] /app 根目录:"
-          ls -lh /app/
-          echo "📸 [容器内快照] /app/release 目录:"
-          ls -lh /app/release/ || echo "⚠️ release 为空"
-
           APPIMAGE=$(find /app -maxdepth 1 -name "*.AppImage" -type f | head -n 1)
           if [ -z "$APPIMAGE" ]; then
-            echo "❌ 致命错误：未生成 .AppImage。查看日志:"
-            tail -n 30 /app/build.log
+            echo "❌ FATAL: No .AppImage generated"
+            tail -n 20 /app/build.log
             exit 1
           fi
 
-          echo "✅ 找到产物: $APPIMAGE"
-          cp -v "$APPIMAGE" /app/release/
+          # 强制复制到固定目录，彻底隔离挂载卷同步问题
+          mkdir -p /app/final-output
+          cp -v "$APPIMAGE" /app/final-output/
           sync
-          echo "✅ 已强制落盘到宿主机"
-          EOF
+          echo "✅ Synced to /app/final-output/"
+          ls -lh /app/final-output/
+          OUTER_EOF
           chmod +x build.sh
+
+      # 5. 执行 Docker 构建
+      - name: Execute Docker Build
+        run: |
+          mkdir -p release
+          docker run --rm --platform linux/arm64 \
+            -v ${{ github.workspace }}:/app \
+            -w /app \
+            debian:11-slim /bin/bash /app/build.sh
+
+      # 6. 宿主机精准提取（解决 Docker 卷未落盘问题）
+      - name: Extract Artifact to Host
+        run: |
+          echo "🔍 扫描工作区..."
+          find ${{ github.workspace }} -name "*.AppImage" -type f -exec ls -lh {} \;
+          
+          # 复制到一个绝对明确的目录
+          mkdir -p upload-ready
+          cp -v ${{ github.workspace }}/final-output/*.AppImage upload-ready/ 2>/dev/null || {
+            echo "⚠️ 未从 final-output 找到，尝试全局兜底..."
+            find ${{ github.workspace }} -name "*.AppImage" -type f -exec cp {} upload-ready/ \;
+          }
+          echo "📦 待上传文件:"
+          ls -lh upload-ready/
+
+      # 7. 上传产物（强制绝对路径 + 明确目录）
+      - name: Upload Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: SPGL-Linux-arm64
+          path: upload-ready/
+          if-no-files-found: error
+          retention-days: 14
