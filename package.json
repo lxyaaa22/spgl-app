@@ -2,6 +2,11 @@
   "name": "spgl-app",
   "private": true,
   "version": "0.0.0",
+  "description": "SPGL Application for Linux",
+  "author": {
+    "name": "lxy",
+    "email": "1139626443@qq.com"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",
