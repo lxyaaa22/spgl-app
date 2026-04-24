@@ -1,30 +1,13 @@
 name: Build Linux ARM64
-
 on:
   push:
-    branches: [ "main" ]
+    branches: [ main ]
   workflow_dispatch:
-
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-  DEBIAN_FRONTEND: noninteractive
 
 jobs:
   build-arm64:
     runs-on: ubuntu-22.04
-    timeout-minutes: 30
-
     steps:
-      - name: Free Disk Space
-        run: |
-          sudo rm -rf /usr/share/dotnet
-          sudo rm -rf /usr/local/lib/android
-          sudo rm -rf /opt/ghc
-          sudo rm -rf "/usr/local/share/boost"
-          sudo rm -rf "$AGENT_TOOLSDIRECTORY"
-          sudo apt-get clean
-          df -h
-
       - uses: actions/checkout@v4
 
       - name: Set up QEMU
@@ -32,95 +15,21 @@ jobs:
         with:
           platforms: arm64
 
-      # ✅ 3. 构建 & 打包 ARM64 AppImage (纯文件拼装法，彻底绕过 QEMU 执行限制)
-      - name: Build & Package ARM64 AppImage
+      - name: Build ARM64 App
+        env:
+          npm_config_build_from_source: true  # 强制重新编译原生模块
         run: |
-          printf '%s\n' '#!/bin/bash' 'set -ex' '' \
-            'echo ">>> 1. 安装基础依赖"' \
-            'apt-get update' \
-            'apt-get install -y --no-install-recommends \
-              curl wget ca-certificates build-essential python3 libudev-dev fakeroot dpkg \
-              zlib1g:arm64 zlib1g-dev:arm64 libglib2.0-0:arm64 libnss3:arm64 \
-              libatk1.0-0:arm64 libatk-bridge2.0-0:arm64 libcups2:arm64 libdrm2:arm64 \
-              libxkbcommon0:arm64 libxcomposite1:arm64 libxdamage1:arm64 libxrandr2:arm64 \
-              libgbm1:arm64 libpango-1.0-0:arm64 libcairo2:arm64 libasound2:arm64 libxss1:arm64 \
-              patchelf:arm64 file fuse xz-utils squashfs-tools desktop-file-utils' \
-            'update-ca-certificates' \
-            '' \
-            'echo ">>> 2. 安装 Node.js 20"' \
-            'NODE_VERSION=20.11.0' \
-            'curl -fsSL https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-arm64.tar.xz -o node.tar.xz' \
-            'tar -xf node.tar.xz -C /usr/local --strip-components=1' \
-            'rm -f node.tar.xz' \
-            'node -v && npm -v' \
-            '' \
-            'echo ">>> 3. 构建项目"' \
-            'npm ci' \
-            'npm run build' \
-            '' \
-            'echo ">>> 4. 生成未打包的 Electron 应用"' \
-            'npx electron-builder --linux dir --arm64 --publish never' \
-            '' \
-            'echo ">>> 5. 准备 AppDir 结构"' \
-            'UNPACKED_DIR=$(find release dist -maxdepth 1 -type d -name "*-unpacked" | head -n 1)' \
-            'if [ -z "${UNPACKED_DIR}" ]; then echo "❌ 找不到 unpacked 目录"; ls -la release/ dist/ 2>/dev/null; exit 1; fi' \
-            'echo "✅ 找到: ${UNPACKED_DIR}"' \
-            '' \
-            'APP_NAME=$(node -e "try{const p=require(\"./package.json\");console.log(p.productName||p.name)}catch(e){console.log(\"\")}" 2>/dev/null)' \
-            'if [ -z "${APP_NAME}" ] || [ ! -f "${UNPACKED_DIR}/${APP_NAME}" ]; then' \
-            '  APP_NAME=$(find "${UNPACKED_DIR}" -maxdepth 1 -type f -executable \
-              ! -name "chrome*" ! -name "lib*" ! -name "*.so*" ! -name "*.node" ! -name "*.sh" \
-              -exec basename {} \; | head -n 1)' \
-            'fi' \
-            'if [ -z "${APP_NAME}" ]; then echo "❌ 无法确定主程序名"; exit 1; fi' \
-            'echo "✅ 主程序: ${APP_NAME}"' \
-            '' \
-            'mkdir -p AppDir/usr/lib' \
-            'cp -r "${UNPACKED_DIR}/." AppDir/' \
-            'chmod +x "AppDir/${APP_NAME}"' \
-            '' \
-            'echo ">>> 6. 修复 libz 依赖"' \
-            'LIBZ_PATH="/usr/lib/aarch64-linux-gnu/libz.so.1"' \
-            'if [ ! -f "${LIBZ_PATH}" ]; then LIBZ_PATH=$(dpkg -L zlib1g:arm64 2>/dev/null | grep libz.so | head -n 1); fi' \
-            'if [ -z "${LIBZ_PATH}" ] || [ ! -f "${LIBZ_PATH}" ]; then echo "❌ 找不到 libz.so.1"; exit 1; fi' \
-            'cp "${LIBZ_PATH}" AppDir/usr/lib/' \
-            'ln -sf libz.so.1 AppDir/usr/lib/libz.so' \
-            '' \
-            'echo ">>> 7. 修复 RPATH 与依赖链接"' \
-            'find AppDir -type f \( -name "*.so*" -o -name "*.node" -o -name "${APP_NAME}" \) -exec \
-              patchelf --set-rpath "\$ORIGIN/../usr/lib:\$ORIGIN/usr/lib:/usr/lib/aarch64-linux-gnu" {} \; 2>/dev/null || true' \
-            'find AppDir -type f \( -name "*.so*" -o -name "*.node" -o -name "${APP_NAME}" \) -exec \
-              bash -c "for lib in \$(patchelf --print-needed \"\$1\" 2>/dev/null); do [ \"\$lib\" = \"libz.so\" ] && patchelf --replace-needed libz.so libz.so.1 \"\$1\"; done" _ {} \; 2>/dev/null || true' \
-            '' \
-            'echo ">>> 8. 创建 AppRun & Desktop"' \
-            'printf "#!/bin/sh\nHERE=\"\$(dirname \"\$(readlink -f \"\$0\")\")\"\nexport LD_LIBRARY_PATH=\"\${HERE}/usr/lib:\${LD_LIBRARY_PATH}\"\nexec \"\${HERE}/${APP_NAME}\" \"\$@\"\n" > AppDir/AppRun' \
-            'chmod +x AppDir/AppRun' \
-            'printf "[Desktop Entry]\nType=Application\nName=${APP_NAME}\nExec=${APP_NAME}\nIcon=${APP_NAME}\nCategories=Utility;\nTerminal=false\n" > AppDir/${APP_NAME}.desktop' \
-            '' \
-            'echo ">>> 9. 验证 AppDir 体积 (应 >100MB)"' \
-            'du -sh AppDir' \
-            '' \
-            'echo ">>> 10. 使用 mksquashfs + Runtime 拼装 (100% 兼容 QEMU)"' \
-            'curl -fsSL -o runtime-aarch64 https://github.com/AppImage/AppImageKit/releases/download/continuous/runtime-aarch64' \
-            'mksquashfs AppDir payload.squashfs -comp xz -root-owned -noappend -no-xattrs' \
-            'cat runtime-aarch64 payload.squashfs > /app/release/${APP_NAME}-arm64.AppImage' \
-            'chmod +x /app/release/${APP_NAME}-arm64.AppImage' \
-            'rm -f runtime-aarch64 payload.squashfs' \
-            '' \
-            'echo ">>> 11. 验证最终产物"' \
-            'FINAL=$(find /app/release -name "*.AppImage" | head -n 1)' \
-            'if [ -z "${FINAL}" ]; then echo "❌ 打包失败"; exit 1; fi' \
-            'echo "✅ 成功生成: $(basename ${FINAL}) [体积: $(du -h ${FINAL} | cut -f1)]"' \
-            'ls -lh /app/release/' > build.sh
-
-          chmod +x build.sh
           docker run --rm --platform linux/arm64 \
-            -v ${GITHUB_WORKSPACE}:/app \
+            -v ${{ github.workspace }}:/app \
             -w /app \
-            "debian:11-slim" bash build.sh
+            arm64v8/node:20-slim bash -c "
+            apt-get update && apt-get install -y build-essential python3 libudev-dev fakeroot dpkg && \
+            npm install && \
+            npm run build && \
+            npx electron-builder --linux deb --arm64 --publish never
+          "
 
       - uses: actions/upload-artifact@v4
         with:
           name: SPGL-Linux-arm64
-          path: release/*.AppImage
-          if-no-files-found: error
+          path: release/*.deb
