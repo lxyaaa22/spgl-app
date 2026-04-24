@@ -15,21 +15,33 @@ jobs:
         with:
           platforms: arm64
 
-      - name: Build ARM64 App
+      - name: Build ARM64 Deb
         env:
-          npm_config_build_from_source: true  # 强制重新编译原生模块
+          npm_config_build_from_source: true
         run: |
           docker run --rm --platform linux/arm64 \
             -v ${{ github.workspace }}:/app \
             -w /app \
             arm64v8/node:20-slim bash -c "
-            apt-get update && apt-get install -y build-essential python3 libudev-dev fakeroot dpkg && \
+            # 1. 安装基础依赖 & Ruby 环境
+            apt-get update && \
+            apt-get install -y --no-install-recommends build-essential python3 libudev-dev fakeroot dpkg ruby ruby-dev && \
+            
+            # 2. 使用 gem 安装原生 fpm (替代 electron-builder 自带的 x86 版)
+            gem install fpm --no-document && \
+            
+            # 3. 强制使用系统 fpm
+            export USE_SYSTEM_FPM=true && \
+            
+            # 4. 安装依赖并构建
             npm install && \
             npm run build && \
+            
+            # 5. 打包 deb
             npx electron-builder --linux deb --arm64 --publish never
-          "
+            "
 
       - uses: actions/upload-artifact@v4
         with:
-          name: SPGL-Linux-arm64
+          name: SPGL-Linux-arm64-deb
           path: release/*.deb
